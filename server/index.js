@@ -7,7 +7,14 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
 
-import { BAILIAN_URL, loadConfig, resolveVoice } from "./config.js";
+import { analysisJsonErrorHandler, createAnalysisHandler } from "./analysisRoute.js";
+import {
+  ANALYSIS_MODEL,
+  BAILIAN_URL,
+  loadConfig,
+  MAX_ANALYSIS_BODY_BYTES,
+  resolveVoice,
+} from "./config.js";
 import {
   clientError,
   parseClientMessage,
@@ -28,9 +35,18 @@ app.get("/api/health", (_request, response) => {
   response.json({
     ok: true,
     realtimeConfigured: Boolean(config.apiKey),
+    analysisConfigured: Boolean(config.apiKey),
     model: "qwen-audio-3.0-realtime-plus",
+    analysisModel: ANALYSIS_MODEL,
   });
 });
+
+app.post(
+  "/api/conversation-analysis",
+  express.json({ limit: MAX_ANALYSIS_BODY_BYTES }),
+  createAnalysisHandler({ config }),
+);
+app.use("/api/conversation-analysis", analysisJsonErrorHandler);
 
 if (isProduction) {
   const distPath = path.resolve(process.cwd(), "dist");

@@ -33,3 +33,19 @@ export function saveTranscripts(items) {
 export function clearTranscripts() {
   sessionStorage.removeItem(STORAGE_KEY);
 }
+
+export function finalizeTranscriptSnapshot(items, endedAt = Date.now()) {
+  const finalized = items.flatMap((item) => {
+    const text = typeof item.text === "string" ? item.text.trim() : "";
+    if (item.status === "streaming" && !text) return [];
+    const next = {
+      ...item,
+      text,
+      ...(item.status === "streaming"
+        ? { status: "interrupted", completedAt: endedAt }
+        : {}),
+    };
+    return [Object.freeze(next)];
+  });
+  return Object.freeze(finalized);
+}

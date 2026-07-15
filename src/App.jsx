@@ -7,14 +7,16 @@ import {
   Radio,
   Volume2,
 } from "lucide-react";
-import { useMemo } from "react";
 
 import { ErrorOverlay } from "./components/ErrorOverlay.jsx";
+import { AnalysisDialog } from "./components/AnalysisDialog.jsx";
 import { StartOverlay } from "./components/StartOverlay.jsx";
 import { TranscriptPanel } from "./components/TranscriptPanel.jsx";
 import { Waveform } from "./components/Waveform.jsx";
 import { useRealtimeConversation } from "./hooks/useRealtimeConversation.js";
+import { useConversationAnalysis } from "./hooks/useConversationAnalysis.js";
 import { VOICE_OPTIONS } from "./config/voices.js";
+import { useCallback, useState } from "react";
 
 const ACTIVE_PHASES = new Set([
   "connecting",
@@ -32,12 +34,25 @@ function formatDuration(seconds) {
 
 export default function App() {
   const conversation = useRealtimeConversation();
+  const analysis = useConversationAnalysis();
+  const [analysisOpen, setAnalysisOpen] = useState(false);
   const active = ACTIVE_PHASES.has(conversation.sessionState.phase);
   const elapsed = formatDuration(conversation.elapsedSeconds);
-  const sessionId = useMemo(() => crypto.randomUUID().slice(0, 4).toUpperCase(), []);
+  const analysisPrevious = Boolean(
+    analysis.snapshot?.conversationId
+    && conversation.conversationId
+    && analysis.snapshot.conversationId !== conversation.conversationId,
+  );
+
+  const endConversation = useCallback(async () => {
+    const snapshot = await conversation.end();
+    if (snapshot) void analysis.generate(snapshot);
+  }, [analysis, conversation]);
 
   const connectionLabel = conversation.sessionState.phase === "disconnected"
     ? "链路中断"
+    : conversation.sessionState.phase === "ending"
+      ? "会话收尾中"
     : conversation.latency != null
       ? `浏览器链路 · ${conversation.latency} ms`
       : active
@@ -72,7 +87,7 @@ export default function App() {
         <div className="console-grid">
           <section className="signal-stage" aria-labelledby="stage-title">
             <div className="stage-meta">
-              <span>SESSION / {sessionId}</span>
+              <span>SESSION / {conversation.conversationShortId}</span>
               <span>QWEN AUDIO 3.0 · PLUS</span>
             </div>
 
@@ -114,7 +129,7 @@ export default function App() {
                   className="round-button round-button--end"
                   type="button"
                   disabled={!active}
-                  onClick={conversation.end}
+                  onClick={endConversation}
                   aria-label="结束实时对话"
                 >
                   <PhoneOff size={18} />
@@ -175,9 +190,19 @@ export default function App() {
             transcripts={conversation.transcripts}
             visible={conversation.captionsVisible}
             elapsed={elapsed}
+            analysis={analysis}
+            analysisPrevious={analysisPrevious}
+            onOpenAnalysis={() => setAnalysisOpen(true)}
+            onRetryAnalysis={analysis.retry}
           />
         </div>
       </section>
+
+      <AnalysisDialog
+        open={analysisOpen}
+        analysis={analysis}
+        onClose={() => setAnalysisOpen(false)}
+      />
 
       <footer className="page-footer">
         <span>QWEN AUDIO 3.0 REALTIME PLUS</span>

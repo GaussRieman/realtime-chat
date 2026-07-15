@@ -1,5 +1,7 @@
 import { Bot, Radio, UserRound } from "lucide-react";
 
+import { AnalysisEntry } from "./AnalysisEntry.jsx";
+
 function formatTime(timestamp) {
   if (!timestamp) return "刚刚";
   return new Intl.DateTimeFormat("zh-CN", {
@@ -8,7 +10,15 @@ function formatTime(timestamp) {
   }).format(timestamp);
 }
 
-export function TranscriptPanel({ transcripts, visible, elapsed }) {
+export function TranscriptPanel({
+  transcripts,
+  visible,
+  elapsed,
+  analysis,
+  analysisPrevious,
+  onOpenAnalysis,
+  onRetryAnalysis,
+}) {
   if (!visible) {
     return (
       <aside className="transcript-panel transcript-panel--hidden" aria-label="实时字幕已隐藏">
@@ -26,7 +36,16 @@ export function TranscriptPanel({ transcripts, visible, elapsed }) {
           <span className="section-kicker">CONVERSATION FEED</span>
           <h2>实时字幕</h2>
         </div>
-        <time>{elapsed}</time>
+        <div className="transcript-panel__actions">
+          <AnalysisEntry
+            status={analysis.status}
+            error={analysis.error}
+            previous={analysisPrevious}
+            onOpen={onOpenAnalysis}
+            onRetry={onRetryAnalysis}
+          />
+          <time>{elapsed}</time>
+        </div>
       </div>
 
       <div className="transcript-list" aria-live="polite">

@@ -9,6 +9,7 @@ import { classifyRealtimeError } from "../realtime/errors.js";
 import {
   clearTranscripts,
   createTranscript,
+  finalizeTranscriptSnapshot,
   loadTranscripts,
   saveTranscripts,
   upsertTranscript,
@@ -28,6 +29,13 @@ const SYSTEM_MESSAGES = {
   PROXY_CLOSED: "实时语音链路已关闭。",
 };
 
+const ENDING_TRANSCRIPT_EVENTS = new Set([
+  "conversation.item.input_audio_transcription.completed",
+  "response.audio_transcript.delta",
+  "response.audio_transcript.done",
+]);
+const TRANSCRIPT_SETTLE_MS = 1_000;
+
 export function useRealtimeConversation() {
   const [sessionState, setSessionState] = useState(INITIAL_STATE);
   const [transcripts, setTranscripts] = useState(() => loadTranscripts());
@@ -39,6 +47,7 @@ export function useRealtimeConversation() {
   const [activeVoice, setActiveVoice] = useState(null);
   const [latency, setLatency] = useState(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [conversationId, setConversationId] = useState(null);
 
   const phaseRef = useRef("idle");
   const clientRef = useRef(null);
@@ -47,12 +56,20 @@ export function useRealtimeConversation() {
   const audioContextRef = useRef(null);
   const gateRef = useRef(new ResponseGate());
   const transcriptRef = useRef(transcripts);
-  const startedAtRef = useRef(null);
+  const conversationIdRef = useRef(null);
+  const activeDurationMsRef = useRef(0);
+  const segmentStartedAtRef = useRef(null);
   const pingSamplesRef = useRef([]);
   const speakingFramesRef = useRef(0);
   const endingRef = useRef(false);
   const activeAssistantIdRef = useRef(null);
   const cleanupRef = useRef(() => Promise.resolve());
+
+  const finishActiveSegment = useCallback(() => {
+    if (segmentStartedAtRef.current == null) return;
+    activeDurationMsRef.current += Math.max(0, Date.now() - segmentStartedAtRef.current);
+    segmentStartedAtRef.current = null;
+  }, []);
 
   const updateState = useCallback((phase, message, detail) => {
     phaseRef.current = phase;
@@ -100,6 +117,8 @@ export function useRealtimeConversation() {
 
   const handleEvent = useCallback((event) => {
     const type = event.type;
+
+    if (endingRef.current && !ENDING_TRANSCRIPT_EVENTS.has(type)) return;
 
     if (type === "client.pong") {
       const sample = Math.max(0, Date.now() - event.sentAt);
@@ -200,6 +219,7 @@ export function useRealtimeConversation() {
   }, [addSystemMessage, interrupt, updateState, updateTranscripts]);
 
   const cleanup = useCallback(async () => {
+    finishActiveSegment();
     const client = clientRef.current;
     const microphone = microphoneRef.current;
     const playback = playbackRef.current;
@@ -214,11 +234,12 @@ export function useRealtimeConversation() {
     setInputLevel(0);
     setOutputLevel(0);
     setLatency(null);
-  }, []);
+  }, [finishActiveSegment]);
 
   cleanupRef.current = cleanup;
 
   const start = useCallback(async () => {
+    if (endingRef.current) return;
     if (!["idle", "ended", "disconnected"].includes(phaseRef.current)) return;
     const isReconnect = phaseRef.current === "disconnected";
     const AudioContextConstructor = window.AudioContext ?? window.webkitAudioContext;
@@ -234,11 +255,15 @@ export function useRealtimeConversation() {
     if (isReconnect) await cleanup();
     audioContextRef.current = audioContext;
     updateState("connecting", "正在建立声音链路", "请允许浏览器使用麦克风。" );
-    setElapsedSeconds(0);
     pingSamplesRef.current = [];
     gateRef.current = new ResponseGate();
 
     if (!isReconnect) {
+      const nextConversationId = crypto.randomUUID();
+      conversationIdRef.current = nextConversationId;
+      setConversationId(nextConversationId);
+      activeDurationMsRef.current = 0;
+      setElapsedSeconds(0);
       clearTranscripts();
       updateTranscripts([]);
     }
@@ -291,7 +316,7 @@ export function useRealtimeConversation() {
       await playback.initialize();
       await client.connect();
       setActiveVoice(voice);
-      startedAtRef.current = Date.now();
+      segmentStartedAtRef.current = Date.now();
       updateState("listening", "正在听你说", "说完后自然停顿，我会自动回应。" );
       addSystemMessage("声音链路已建立，可以直接开始说话");
     } catch (error) {
@@ -309,10 +334,34 @@ export function useRealtimeConversation() {
   }, [addSystemMessage, cleanup, handleEvent, interrupt, updateState, updateTranscripts, voice]);
 
   const end = useCallback(async () => {
+    if (endingRef.current || !conversationIdRef.current) return null;
     endingRef.current = true;
+    finishActiveSegment();
+    updateState("ending", "正在结束本次对话", "音频已停止，正在整理最后的字幕。" );
+
+    const microphone = microphoneRef.current;
+    const playback = playbackRef.current;
+    microphoneRef.current = null;
+    playbackRef.current = null;
+    playback?.invalidate();
+    setInputLevel(0);
+    setOutputLevel(0);
+    await Promise.allSettled([microphone?.stop(), playback?.close()]);
+
+    await new Promise((resolve) => window.setTimeout(resolve, TRANSCRIPT_SETTLE_MS));
     await cleanup();
-    updateState("ended", "本次对话已结束", "字幕记录会保留到当前标签页关闭。" );
-  }, [cleanup, updateState]);
+    const endedAt = Date.now();
+    const transcript = finalizeTranscriptSnapshot(transcriptRef.current, endedAt);
+    updateTranscripts(transcript);
+    endingRef.current = false;
+    updateState("ended", "本次对话已结束", "字幕记录已保存，正在生成会话摘要。" );
+    return Object.freeze({
+      conversationId: conversationIdRef.current,
+      transcript,
+      durationSeconds: Math.floor(activeDurationMsRef.current / 1_000),
+      endedAt,
+    });
+  }, [cleanup, finishActiveSegment, updateState, updateTranscripts]);
 
   const setMuted = useCallback((nextMuted) => {
     microphoneRef.current?.setMuted(nextMuted);
@@ -326,9 +375,10 @@ export function useRealtimeConversation() {
   useEffect(() => {
     if (!["listening", "generating", "speaking", "interrupted"].includes(sessionState.phase)) return undefined;
     const timer = window.setInterval(() => {
-      if (startedAtRef.current) {
-        setElapsedSeconds(Math.floor((Date.now() - startedAtRef.current) / 1000));
-      }
+      const activeSegmentMs = segmentStartedAtRef.current == null
+        ? 0
+        : Date.now() - segmentStartedAtRef.current;
+      setElapsedSeconds(Math.floor((activeDurationMsRef.current + activeSegmentMs) / 1000));
     }, 1000);
     const ping = window.setInterval(() => {
       clientRef.current?.send({ type: "client.ping", sentAt: Date.now() });
@@ -358,6 +408,8 @@ export function useRealtimeConversation() {
     activeVoice,
     latency,
     elapsedSeconds,
+    conversationId,
+    conversationShortId: conversationId?.slice(0, 4).toUpperCase() ?? "----",
     start,
     end,
     setMuted,
