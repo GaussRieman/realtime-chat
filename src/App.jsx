@@ -1,6 +1,7 @@
 import {
   Captions,
   CaptionsOff,
+  History,
   Mic,
   MicOff,
   Pause,
@@ -12,11 +13,13 @@ import {
 
 import { ErrorOverlay } from "./components/ErrorOverlay.jsx";
 import { AnalysisDialog } from "./components/AnalysisDialog.jsx";
+import { HistoryDialog } from "./components/HistoryDialog.jsx";
 import { StartOverlay } from "./components/StartOverlay.jsx";
 import { TranscriptPanel } from "./components/TranscriptPanel.jsx";
 import { Waveform } from "./components/Waveform.jsx";
 import { useRealtimeConversation } from "./hooks/useRealtimeConversation.js";
 import { useConversationAnalysis } from "./hooks/useConversationAnalysis.js";
+import { useConversationHistory } from "./hooks/useConversationHistory.js";
 import { VOICE_OPTIONS } from "./config/voices.js";
 import { useCallback, useState } from "react";
 
@@ -37,7 +40,9 @@ function formatDuration(seconds) {
 export default function App() {
   const conversation = useRealtimeConversation();
   const analysis = useConversationAnalysis();
+  const history = useConversationHistory();
   const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const phase = conversation.sessionState.phase;
   const active = ACTIVE_PHASES.has(phase);
   const paused = phase === "paused";
@@ -52,8 +57,20 @@ export default function App() {
 
   const endConversation = useCallback(async () => {
     const snapshot = await conversation.end();
-    if (snapshot) void analysis.generate(snapshot);
-  }, [analysis, conversation]);
+    if (!snapshot) return;
+    void history.saveSnapshot(snapshot);
+    const result = await analysis.generate(snapshot);
+    if (result) void history.saveAnalysis(snapshot, result);
+  }, [analysis, conversation, history]);
+
+  const retryAnalysis = useCallback(async () => {
+    const result = await analysis.retry();
+    if (result && analysis.snapshot) void history.saveAnalysis(analysis.snapshot, result);
+  }, [analysis, history]);
+
+  const storageState = history.available === false
+    ? { status: "unavailable", conversationId: null, error: null }
+    : history.saveState;
 
   const connectionLabel = conversation.sessionState.phase === "disconnected"
     ? "链路中断"
@@ -87,6 +104,16 @@ export default function App() {
           </div>
 
           <div className="topbar__actions">
+            <button
+              className="history-button"
+              type="button"
+              disabled={history.available !== true}
+              onClick={() => setHistoryOpen(true)}
+              title={history.available === false ? "会话存储暂不可用" : "查看历史会话"}
+            >
+              <History size={15} />
+              <span>历史</span>
+            </button>
             <div className={`connection-state connection-state--${conversation.sessionState.phase}`}>
               <span className="connection-state__dot" />
               <span>{connectionLabel}</span>
@@ -212,7 +239,9 @@ export default function App() {
             analysis={analysis}
             analysisPrevious={analysisPrevious}
             onOpenAnalysis={() => setAnalysisOpen(true)}
-            onRetryAnalysis={analysis.retry}
+            onRetryAnalysis={retryAnalysis}
+            storageState={storageState}
+            onRetryStorage={history.retryLastSave}
           />
         </div>
       </section>
@@ -221,6 +250,15 @@ export default function App() {
         open={analysisOpen}
         analysis={analysis}
         onClose={() => setAnalysisOpen(false)}
+        onPersist={(snapshot, result) => history.saveAnalysis(snapshot, result)}
+        storageState={storageState}
+        onRetryStorage={history.retryLastSave}
+      />
+
+      <HistoryDialog
+        open={historyOpen}
+        history={history}
+        onClose={() => setHistoryOpen(false)}
       />
 
       <footer className="page-footer">

@@ -34,4 +34,10 @@ describe("analysis configuration", () => {
   it("trims the shared DashScope API key", () => {
     expect(loadConfig({ DASHSCOPE_API_KEY: "  sk-test  " }).apiKey).toBe("sk-test");
   });
+
+  it("uses a configurable SQLite path", () => {
+    expect(loadConfig({ DATABASE_PATH: "  /tmp/history.sqlite  " }).databasePath)
+      .toBe("/tmp/history.sqlite");
+    expect(loadConfig({}).databasePath).toBe("data/audio-anything.sqlite");
+  });
 });

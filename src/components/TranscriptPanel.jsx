@@ -1,6 +1,7 @@
 import { Bot, Radio, UserRound } from "lucide-react";
 
 import { AnalysisEntry } from "./AnalysisEntry.jsx";
+import { StorageEntry } from "./StorageEntry.jsx";
 
 function formatTime(timestamp) {
   if (!timestamp) return "刚刚";
@@ -18,6 +19,8 @@ export function TranscriptPanel({
   analysisPrevious,
   onOpenAnalysis,
   onRetryAnalysis,
+  storageState,
+  onRetryStorage,
 }) {
   if (!visible) {
     return (
@@ -37,6 +40,7 @@ export function TranscriptPanel({
           <h2>实时字幕</h2>
         </div>
         <div className="transcript-panel__actions">
+          <StorageEntry state={storageState} onRetry={onRetryStorage} />
           <AnalysisEntry
             status={analysis.status}
             error={analysis.error}

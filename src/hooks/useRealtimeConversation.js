@@ -32,6 +32,7 @@ const SYSTEM_MESSAGES = {
 
 const ENDING_TRANSCRIPT_EVENTS = new Set([
   "conversation.item.input_audio_transcription.completed",
+  "conversation.item.input_audio_transcription.failed",
   "response.audio_transcript.delta",
   "response.audio_transcript.done",
 ]);
@@ -58,6 +59,9 @@ export function useRealtimeConversation() {
   const gateRef = useRef(new ResponseGate());
   const transcriptRef = useRef(transcripts);
   const conversationIdRef = useRef(null);
+  const conversationStartedAtRef = useRef(null);
+  const activeVoiceRef = useRef(null);
+  const transcriptionFailureCountRef = useRef(0);
   const activeDurationMsRef = useRef(0);
   const segmentStartedAtRef = useRef(null);
   const pingSamplesRef = useRef([]);
@@ -143,6 +147,14 @@ export function useRealtimeConversation() {
       if (classified.action === "disconnect") {
         updateState("disconnected", "声音链路已中断", message);
         void cleanupRef.current();
+      }
+      return;
+    }
+
+    if (type === "conversation.item.input_audio_transcription.failed") {
+      transcriptionFailureCountRef.current += 1;
+      if (transcriptionFailureCountRef.current === 1) {
+        addSystemMessage("用户语音转写暂不可用，本次文字记录可能不完整", "error");
       }
       return;
     }
@@ -289,7 +301,11 @@ export function useRealtimeConversation() {
     if (!isReconnect) {
       const nextConversationId = crypto.randomUUID();
       conversationIdRef.current = nextConversationId;
+      conversationStartedAtRef.current = Date.now();
+      activeVoiceRef.current = null;
+      transcriptionFailureCountRef.current = 0;
       setConversationId(nextConversationId);
+      setActiveVoice(null);
       activeDurationMsRef.current = 0;
       setElapsedSeconds(0);
       clearTranscripts();
@@ -298,7 +314,8 @@ export function useRealtimeConversation() {
 
     const playback = new AudioPlaybackQueue({ context: audioContext, onLevel: setOutputLevel });
     playbackRef.current = playback;
-    const client = new RealtimeClient({ voice });
+    const connectionVoice = isReconnect ? activeVoiceRef.current ?? voice : voice;
+    const client = new RealtimeClient({ voice: connectionVoice });
     clientRef.current = client;
     client.addEventListener("event", ({ detail }) => handleEvent(detail));
     client.addEventListener("disconnect", () => {
@@ -343,7 +360,8 @@ export function useRealtimeConversation() {
       if (audioContext.state !== "running") throw new Error("AUDIO_CONTEXT_SUSPENDED");
       await playback.initialize();
       await client.connect();
-      setActiveVoice(voice);
+      activeVoiceRef.current = connectionVoice;
+      setActiveVoice(connectionVoice);
       segmentStartedAtRef.current = Date.now();
       updateState("listening", "正在听你说", "说完后自然停顿，我会自动回应。" );
       addSystemMessage("声音链路已建立，可以直接开始说话");
@@ -382,14 +400,17 @@ export function useRealtimeConversation() {
     const transcript = finalizeTranscriptSnapshot(transcriptRef.current, endedAt);
     updateTranscripts(transcript);
     endingRef.current = false;
-    updateState("ended", "本次对话已结束", "字幕记录已保存，正在生成会话摘要。" );
+    updateState("ended", "本次对话已结束", "字幕记录已整理，正在保存并生成会话摘要。" );
     return Object.freeze({
       conversationId: conversationIdRef.current,
       transcript,
       durationSeconds: Math.floor(activeDurationMsRef.current / 1_000),
+      startedAt: conversationStartedAtRef.current ?? endedAt,
       endedAt,
+      voice: activeVoiceRef.current ?? voice,
+      transcriptionFailureCount: transcriptionFailureCountRef.current,
     });
-  }, [cleanup, finishActiveSegment, updateState, updateTranscripts]);
+  }, [cleanup, finishActiveSegment, updateState, updateTranscripts, voice]);
 
   const setMuted = useCallback((nextMuted) => {
     microphoneRef.current?.setMuted(nextMuted);

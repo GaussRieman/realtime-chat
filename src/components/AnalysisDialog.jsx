@@ -9,6 +9,7 @@ import {
   transcriptText,
 } from "../analysis/markdown.js";
 import { AnalysisToolbar } from "./AnalysisToolbar.jsx";
+import { StorageEntry } from "./StorageEntry.jsx";
 import { ConcernsTab } from "./analysis/ConcernsTab.jsx";
 import { OriginalTranscriptTab } from "./analysis/OriginalTranscriptTab.jsx";
 import { SummaryTab } from "./analysis/SummaryTab.jsx";
@@ -25,7 +26,14 @@ function formatDuration(seconds) {
   return `${minutes}:${remainder}`;
 }
 
-export function AnalysisDialog({ open, analysis, onClose }) {
+export function AnalysisDialog({
+  open,
+  analysis,
+  onClose,
+  onPersist,
+  storageState,
+  onRetryStorage,
+}) {
   const dialogRef = useRef(null);
   const tabRefs = useRef(new Map());
   const [activeTab, setActiveTab] = useState("summary");
@@ -106,14 +114,16 @@ export function AnalysisDialog({ open, analysis, onClose }) {
   };
 
   const saveEdit = () => {
+    let next = null;
     if (editing === "summary") {
       if (!summaryDraft.trim()) return;
-      analysis.saveSummary(summaryDraft);
+      next = analysis.saveSummary(summaryDraft);
     }
     if (editing === "concerns") {
       if (!concernDrafts.every((item) => item.trim())) return;
-      analysis.saveConcerns(concernDrafts);
+      next = analysis.saveConcerns(concernDrafts);
     }
+    if (next) onPersist?.(snapshot, next);
     setEditing(null);
   };
 
@@ -178,9 +188,12 @@ export function AnalysisDialog({ open, analysis, onClose }) {
               <p>{formatDuration(snapshot.durationSeconds)} · {snapshot.transcript.length} 条记录</p>
             </div>
           </div>
-          <button className="analysis-close" type="button" onClick={closeDialog} aria-label="关闭会话分析">
-            <X size={18} />
-          </button>
+          <div className="analysis-dialog__header-actions">
+            <StorageEntry state={storageState} onRetry={onRetryStorage} />
+            <button className="analysis-close" type="button" onClick={closeDialog} aria-label="关闭会话分析">
+              <X size={18} />
+            </button>
+          </div>
         </header>
 
         <div className="analysis-dialog__nav">

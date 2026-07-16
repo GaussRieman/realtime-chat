@@ -16,11 +16,14 @@ export const ALLOWED_VOICES = new Set([
 ]);
 export const MAX_CLIENT_MESSAGE_BYTES = 512 * 1024;
 export const MAX_ANALYSIS_BODY_BYTES = 512 * 1024;
+export const MAX_CONVERSATION_BODY_BYTES = 1024 * 1024;
+export const MAX_ANALYSIS_UPDATE_BODY_BYTES = 256 * 1024;
 
 export function loadConfig(env = process.env) {
   return {
     apiKey: env.DASHSCOPE_API_KEY?.trim() ?? "",
     port: Number.parseInt(env.PORT ?? "5173", 10),
+    databasePath: env.DATABASE_PATH?.trim() || "data/audio-anything.sqlite",
     allowedOrigins: new Set(
       (env.ALLOWED_ORIGINS?.split(",") ?? DEFAULT_ORIGINS)
         .map((origin) => origin.trim())

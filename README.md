@@ -4,7 +4,7 @@
 
 ## 运行
 
-要求 Node.js 20 或更高版本。
+要求 Node.js 22.13 或更高版本（会话存储使用内置 `node:sqlite`）。
 
 ```bash
 npm install
@@ -15,6 +15,9 @@ cp .env.example .env
 
 ```dotenv
 DASHSCOPE_API_KEY=你的百炼_API_KEY
+
+# 可选，默认值如下
+DATABASE_PATH=data/audio-anything.sqlite
 ```
 
 启动开发环境：
@@ -52,6 +55,9 @@ npm start
 - 中央分析报告提供摘要、关注点和完整原文三个页签
 - 摘要与关注点可编辑，支持当前页复制和完整 Markdown 下载
 - 关注点可定位到对应原文，模型输出失败时保留原始字幕并支持安全重试
+- 会话结束后自动保存元信息、字幕、转写完整状态、分析结果和用户编辑
+- 本机 SQLite 历史记录，支持查看最近 50 条会话并复制或下载报告
+- 不保存麦克风或千问回复的原始音频
 - 移动端响应式信号指挥台界面
 
 ## 实时会话说明
@@ -67,10 +73,13 @@ npm start
 - 文本分析与实时语音共用 `DASHSCOPE_API_KEY`，不需要额外环境变量。
 - 分析接口为 `POST /api/conversation-analysis`，浏览器只访问同源 Node.js 服务。
 - 完整原文来自结束时冻结的本地字幕快照，不由 Qwen 3.7 Max 重新生成。
-- 分析结果和用户编辑只保存在当前页面内存；刷新页面后不会恢复，也不会写入数据库。
+- 会话基础记录会先写入 SQLite；分析结果和用户保存后的编辑随后更新同一条会话。
+- 默认数据库文件为 `data/audio-anything.sqlite`，可通过 `DATABASE_PATH` 指定其他本机路径。
+- SQLite 暂不可用时，实时语音和分析仍可继续使用，并在界面提示记录未保存。
 - 服务端对请求大小、角色、状态、UUID、模型结构化输出和证据序号进行校验。
 
 完整设计见：
 
 - `docs/superpowers/specs/2026-07-15-audio-anything-realtime-voice-design.md`
 - `docs/superpowers/specs/2026-07-15-conversation-analysis-design.md`
+- `docs/superpowers/specs/2026-07-16-conversation-storage-design.md`

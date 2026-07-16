@@ -8,11 +8,15 @@ import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
 
 import { analysisJsonErrorHandler, createAnalysisHandler } from "./analysisRoute.js";
+import { conversationJsonErrorHandler, createConversationHandlers } from "./conversationRoute.js";
+import { ConversationStore } from "./conversationStore.js";
 import {
   ANALYSIS_MODEL,
   BAILIAN_URL,
   loadConfig,
   MAX_ANALYSIS_BODY_BYTES,
+  MAX_ANALYSIS_UPDATE_BODY_BYTES,
+  MAX_CONVERSATION_BODY_BYTES,
   resolveVoice,
 } from "./config.js";
 import {
@@ -29,6 +33,19 @@ const app = express();
 const server = http.createServer(app);
 const realtimeServer = new WebSocketServer({ noServer: true, maxPayload: 512 * 1024 });
 const isProduction = process.env.NODE_ENV === "production";
+let conversationStore = null;
+
+try {
+  conversationStore = new ConversationStore(config.databasePath);
+  console.info("Conversation storage initialized.");
+} catch (error) {
+  console.warn(`[storage] initialization failed: ${error.code ?? "STORAGE_UNAVAILABLE"}`);
+}
+
+const conversationHandlers = createConversationHandlers({
+  store: conversationStore,
+  config,
+});
 
 app.disable("x-powered-by");
 app.get("/api/health", (_request, response) => {
@@ -36,6 +53,7 @@ app.get("/api/health", (_request, response) => {
     ok: true,
     realtimeConfigured: Boolean(config.apiKey),
     analysisConfigured: Boolean(config.apiKey),
+    storageConfigured: Boolean(conversationStore),
     model: "qwen-audio-3.0-realtime-plus",
     analysisModel: ANALYSIS_MODEL,
   });
@@ -47,6 +65,20 @@ app.post(
   createAnalysisHandler({ config }),
 );
 app.use("/api/conversation-analysis", analysisJsonErrorHandler);
+
+app.post(
+  "/api/conversations",
+  express.json({ limit: MAX_CONVERSATION_BODY_BYTES }),
+  conversationHandlers.save,
+);
+app.patch(
+  "/api/conversations/:conversationId/analysis",
+  express.json({ limit: MAX_ANALYSIS_UPDATE_BODY_BYTES }),
+  conversationHandlers.updateAnalysis,
+);
+app.get("/api/conversations", conversationHandlers.list);
+app.get("/api/conversations/:conversationId", conversationHandlers.detail);
+app.use("/api/conversations", conversationJsonErrorHandler);
 
 if (isProduction) {
   const distPath = path.resolve(process.cwd(), "dist");
@@ -227,6 +259,35 @@ server.listen(config.port, "0.0.0.0", () => {
     console.info("Realtime calls disabled until DASHSCOPE_API_KEY is configured.");
   }
 });
+
+let shuttingDown = false;
+
+function closeConversationStore() {
+  try {
+    conversationStore?.close();
+  } catch {
+    console.warn("[storage] close failed");
+  }
+  conversationStore = null;
+}
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.info(`Received ${signal}; shutting down.`);
+  for (const client of realtimeServer.clients) client.close(1001, "server shutting down");
+  server.close(() => {
+    closeConversationStore();
+    process.exit(0);
+  });
+  setTimeout(() => {
+    closeConversationStore();
+    process.exit(1);
+  }, 5_000).unref();
+}
+
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));
 
 function loadEnvFile() {
   const envPath = path.resolve(process.cwd(), ".env");

@@ -50,12 +50,24 @@ export function useConversationAnalysis() {
   }, [generate, state.error?.retryable, state.snapshot]);
 
   const saveSummary = useCallback((summary) => {
-    dispatch({ type: "save-summary", summary });
-  }, []);
+    if (!state.result) return null;
+    const nextSummary = summary.trim();
+    if (!nextSummary) return null;
+    const next = { ...state.result, summary: nextSummary, summaryEdited: true };
+    dispatch({ type: "save-summary", summary: nextSummary });
+    return next;
+  }, [state.result]);
 
   const saveConcerns = useCallback((concerns) => {
+    if (!state.result || concerns.length !== state.result.concerns.length) return null;
+    const nextConcerns = state.result.concerns.map((concern, index) => {
+      const text = concerns[index]?.trim();
+      return text ? { ...concern, text } : concern;
+    });
+    const next = { ...state.result, concerns: nextConcerns, concernsEdited: true };
     dispatch({ type: "save-concerns", concerns });
-  }, []);
+    return next;
+  }, [state.result]);
 
   useEffect(() => () => controllerRef.current?.abort(), []);
 
