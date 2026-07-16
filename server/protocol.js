@@ -1,6 +1,10 @@
 import { MAX_CLIENT_MESSAGE_BYTES } from "./config.js";
 
-const CLIENT_EVENTS = new Set(["input_audio_buffer.append", "response.cancel"]);
+const CLIENT_EVENTS = new Set([
+  "input_audio_buffer.append",
+  "input_audio_buffer.commit",
+  "response.cancel",
+]);
 
 export function parseClientMessage(raw) {
   const byteLength = Buffer.isBuffer(raw)

@@ -3,7 +3,9 @@ import {
   CaptionsOff,
   Mic,
   MicOff,
+  Pause,
   PhoneOff,
+  Play,
   Radio,
   Volume2,
 } from "lucide-react";
@@ -19,12 +21,12 @@ import { VOICE_OPTIONS } from "./config/voices.js";
 import { useCallback, useState } from "react";
 
 const ACTIVE_PHASES = new Set([
-  "connecting",
   "listening",
   "generating",
   "speaking",
   "interrupted",
 ]);
+const PAUSABLE_PHASES = new Set(["listening", "generating", "speaking", "interrupted"]);
 
 function formatDuration(seconds) {
   const minutes = Math.floor(seconds / 60).toString().padStart(2, "0");
@@ -36,7 +38,11 @@ export default function App() {
   const conversation = useRealtimeConversation();
   const analysis = useConversationAnalysis();
   const [analysisOpen, setAnalysisOpen] = useState(false);
-  const active = ACTIVE_PHASES.has(conversation.sessionState.phase);
+  const phase = conversation.sessionState.phase;
+  const active = ACTIVE_PHASES.has(phase);
+  const paused = phase === "paused";
+  const canTogglePause = PAUSABLE_PHASES.has(phase) || paused;
+  const canEnd = active || paused;
   const elapsed = formatDuration(conversation.elapsedSeconds);
   const analysisPrevious = Boolean(
     analysis.snapshot?.conversationId
@@ -53,6 +59,10 @@ export default function App() {
     ? "链路中断"
     : conversation.sessionState.phase === "ending"
       ? "会话收尾中"
+    : conversation.sessionState.phase === "connecting"
+      ? "正在连接"
+    : paused
+      ? "会话已暂停"
     : conversation.latency != null
       ? `浏览器链路 · ${conversation.latency} ms`
       : active
@@ -126,9 +136,18 @@ export default function App() {
                   {conversation.muted ? <MicOff size={18} /> : <Mic size={18} />}
                 </button>
                 <button
+                  className={`round-button ${paused ? "round-button--active" : ""}`}
+                  type="button"
+                  disabled={!canTogglePause}
+                  onClick={() => (paused ? conversation.resume() : conversation.pause())}
+                  aria-label={paused ? "继续对话" : "暂停对话"}
+                >
+                  {paused ? <Play size={18} /> : <Pause size={18} />}
+                </button>
+                <button
                   className="round-button round-button--end"
                   type="button"
-                  disabled={!active}
+                  disabled={!canEnd}
                   onClick={endConversation}
                   aria-label="结束实时对话"
                 >

@@ -14,6 +14,7 @@ export class MicrophoneCapture {
     this.onAudio = onAudio;
     this.onLevel = onLevel;
     this.muted = false;
+    this.paused = false;
     this.pending = [];
     this.pendingLength = 0;
   }
@@ -65,15 +66,32 @@ export class MicrophoneCapture {
 
     const level = rms(frame);
     this.onLevel?.(Math.min(1, level * 7));
-    if (this.muted) return;
+    if (this.muted || this.paused) return;
 
     const resampled = resampleLinear(frame, this.context.sampleRate, INPUT_SAMPLE_RATE);
     this.onAudio?.(float32ToPcm16(resampled), level);
   }
 
+  applyTrackState() {
+    const enabled = !this.muted && !this.paused;
+    for (const track of this.stream?.getAudioTracks() ?? []) track.enabled = enabled;
+  }
+
   setMuted(muted) {
     this.muted = muted;
-    for (const track of this.stream?.getAudioTracks() ?? []) track.enabled = !muted;
+    this.applyTrackState();
+  }
+
+  // Stops upload and disables the track while keeping the user's mute preference intact,
+  // so resume() can restore it exactly as it was before the pause.
+  pause() {
+    this.paused = true;
+    this.applyTrackState();
+  }
+
+  resume() {
+    this.paused = false;
+    this.applyTrackState();
   }
 
   async stop() {

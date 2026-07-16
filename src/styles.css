@@ -196,6 +196,11 @@ textarea:focus-visible {
   box-shadow: 0 0 14px var(--red);
 }
 
+.connection-state--paused .connection-state__dot {
+  background: var(--amber);
+  box-shadow: 0 0 14px var(--amber);
+}
+
 .icon-button,
 .round-button {
   display: grid;
@@ -329,6 +334,7 @@ textarea:focus-visible {
 .waveform--idle .waveform__bar,
 .waveform--ending .waveform__bar,
 .waveform--ended .waveform__bar,
+.waveform--paused .waveform__bar,
 .waveform--disconnected .waveform__bar { opacity: 0.25; }
 
 .waveform__interrupt {

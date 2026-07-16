@@ -3,6 +3,7 @@ export class RealtimeClient extends EventTarget {
     super();
     this.voice = voice;
     this.ready = false;
+    this.closedIntentionally = false;
   }
 
   connect() {
@@ -48,6 +49,7 @@ export class RealtimeClient extends EventTarget {
           settled = true;
           reject(new Error("PROXY_CLOSED"));
         }
+        if (this.closedIntentionally) return;
         this.dispatchEvent(new CustomEvent("disconnect", { detail: event }));
       });
     });
@@ -61,6 +63,7 @@ export class RealtimeClient extends EventTarget {
 
   close() {
     this.ready = false;
+    this.closedIntentionally = true;
     if (this.socket?.readyState <= WebSocket.OPEN) this.socket.close(1000, "client ended session");
   }
 }

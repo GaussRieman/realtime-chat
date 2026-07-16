@@ -183,6 +183,15 @@ realtimeServer.on("connection", (client, request) => {
       client.send(JSON.stringify({ type: "proxy.ready", connectionId }));
     }
 
+    if (process.env.DEBUG_UPSTREAM_EVENTS) {
+      const verbose = [
+        "conversation.item.input_audio_transcription.completed",
+        "conversation.item.input_audio_transcription.failed",
+        "error",
+      ].includes(event.type);
+      console.info(`[realtime:${connectionId}] upstream event: ${event.type}`, verbose ? JSON.stringify(event) : "");
+    }
+
     client.send(safeUpstreamError(raw));
   });
 

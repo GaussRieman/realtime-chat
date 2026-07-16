@@ -15,6 +15,9 @@ describe("proxy protocol", () => {
     expect(parseClientMessage(Buffer.from(JSON.stringify({
       type: "response.cancel",
     }))).ok).toBe(true);
+    expect(parseClientMessage(Buffer.from(JSON.stringify({
+      type: "input_audio_buffer.commit",
+    }))).ok).toBe(true);
   });
 
   it("rejects unknown and invalid events", () => {

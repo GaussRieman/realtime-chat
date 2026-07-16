@@ -65,6 +65,12 @@ export function useRealtimeConversation() {
   const endingRef = useRef(false);
   const activeAssistantIdRef = useRef(null);
   const cleanupRef = useRef(() => Promise.resolve());
+  // Latched while paused (and until the next post-resume speech_started) so late
+  // response.created/audio/transcript events from before the pause are discarded.
+  const responseSuppressedRef = useRef(false);
+  // Tracks whether the upstream has an in-progress user turn (speech_started without
+  // a matching speech_stopped yet), so pause() knows whether to commit it.
+  const speechOpenRef = useRef(false);
 
   const finishActiveSegment = useCallback(() => {
     if (segmentStartedAtRef.current == null) return;
@@ -142,18 +148,32 @@ export function useRealtimeConversation() {
     }
 
     if (type === "input_audio_buffer.speech_started") {
+      // A stray/late VAD event that arrives while still paused must not change phase
+      // or state; pause() already committed/cancelled whatever was in flight.
+      if (phaseRef.current === "paused") return;
+      speechOpenRef.current = true;
+      if (responseSuppressedRef.current) {
+        gateRef.current.invalidateCurrent();
+        responseSuppressedRef.current = false;
+      }
       interrupt("server");
       updateState("listening", "正在听你说", "说完后自然停顿，我会自动回应。");
       return;
     }
 
     if (type === "input_audio_buffer.speech_stopped") {
+      if (phaseRef.current === "paused") return;
+      speechOpenRef.current = false;
       updateState("generating", "正在组织回应", "语音已经收到，答案马上抵达。" );
       return;
     }
 
     if (type === "response.created") {
       const responseId = gateRef.current.resolveId(event) ?? event.response?.id;
+      if (responseSuppressedRef.current) {
+        clientRef.current?.send({ type: "response.cancel" });
+        return;
+      }
       gateRef.current.begin(responseId);
       return;
     }
@@ -229,9 +249,14 @@ export function useRealtimeConversation() {
     microphoneRef.current = null;
     playbackRef.current = null;
     audioContextRef.current = null;
-    client?.close();
-    await Promise.allSettled([microphone?.stop(), playback?.close()]);
-    if (audioContext && audioContext.state !== "closed") await audioContext.close();
+    await Promise.allSettled([
+      Promise.resolve().then(() => client?.close()),
+      Promise.resolve().then(() => microphone?.stop()),
+      Promise.resolve().then(() => playback?.close()),
+      Promise.resolve().then(() => (
+        audioContext && audioContext.state !== "closed" ? audioContext.close() : undefined
+      )),
+    ]);
     setInputLevel(0);
     setOutputLevel(0);
     setLatency(null);
@@ -258,6 +283,8 @@ export function useRealtimeConversation() {
     updateState("connecting", "正在建立声音链路", "请允许浏览器使用麦克风。" );
     pingSamplesRef.current = [];
     gateRef.current = new ResponseGate();
+    responseSuppressedRef.current = false;
+    speechOpenRef.current = false;
 
     if (!isReconnect) {
       const nextConversationId = crypto.randomUUID();
@@ -369,6 +396,44 @@ export function useRealtimeConversation() {
     setMutedState(nextMuted);
   }, []);
 
+  const pause = useCallback(() => {
+    if (!["listening", "generating", "speaking", "interrupted"].includes(phaseRef.current)) return;
+    finishActiveSegment();
+
+    microphoneRef.current?.pause();
+    playbackRef.current?.invalidate();
+
+    const activeId = activeAssistantIdRef.current;
+    const hadActiveResponse = Boolean(gateRef.current.currentResponseId);
+    gateRef.current.invalidateCurrent();
+    activeAssistantIdRef.current = null;
+    if (hadActiveResponse) clientRef.current?.send({ type: "response.cancel" });
+
+    if (speechOpenRef.current) {
+      clientRef.current?.send({ type: "input_audio_buffer.commit" });
+      speechOpenRef.current = false;
+    }
+
+    responseSuppressedRef.current = true;
+
+    if (activeId) {
+      updateTranscripts((items) => items.map((item) => {
+        if (item.id !== activeId) return item;
+        const text = item.text.endsWith("…") ? item.text : `${item.text}…`;
+        return { ...item, text, status: "interrupted", completedAt: Date.now() };
+      }));
+    }
+
+    updateState("paused", "会话已暂停", "点击继续以恢复对话。");
+  }, [finishActiveSegment, updateState, updateTranscripts]);
+
+  const resume = useCallback(() => {
+    if (phaseRef.current !== "paused") return;
+    microphoneRef.current?.resume();
+    segmentStartedAtRef.current = Date.now();
+    updateState("listening", "正在听你说", "说完后自然停顿，我会自动回应。");
+  }, [updateState]);
+
   useEffect(() => {
     transcriptRef.current = transcripts;
   }, [transcripts]);
@@ -381,13 +446,17 @@ export function useRealtimeConversation() {
         : Date.now() - segmentStartedAtRef.current;
       setElapsedSeconds(Math.floor((activeDurationMsRef.current + activeSegmentMs) / 1000));
     }, 1000);
+    return () => window.clearInterval(timer);
+  }, [sessionState.phase]);
+
+  useEffect(() => {
+    // The heartbeat keeps running through `paused` so the WebSocket transport stays
+    // alive and reconnect-worthy failures are still detected while paused.
+    if (!["listening", "generating", "speaking", "interrupted", "paused"].includes(sessionState.phase)) return undefined;
     const ping = window.setInterval(() => {
       clientRef.current?.send({ type: "client.ping", sentAt: Date.now() });
     }, 3000);
-    return () => {
-      window.clearInterval(timer);
-      window.clearInterval(ping);
-    };
+    return () => window.clearInterval(ping);
   }, [sessionState.phase]);
 
   useEffect(() => mountConversationLifecycle(endingRef, () => {
@@ -412,6 +481,8 @@ export function useRealtimeConversation() {
     conversationShortId: conversationId?.slice(0, 4).toUpperCase() ?? "----",
     start,
     end,
+    pause,
+    resume,
     setMuted,
     setCaptionsVisible,
     setVoice,
