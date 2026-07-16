@@ -5,6 +5,7 @@ import { MicrophoneCapture } from "../audio/MicrophoneCapture.js";
 import { int16ToBase64 } from "../audio/pcm.js";
 import { RealtimeClient } from "../realtime/RealtimeClient.js";
 import { ResponseGate } from "../realtime/ResponseGate.js";
+import { mountConversationLifecycle } from "../realtime/conversationLifecycle.js";
 import { classifyRealtimeError } from "../realtime/errors.js";
 import {
   clearTranscripts,
@@ -389,13 +390,12 @@ export function useRealtimeConversation() {
     };
   }, [sessionState.phase]);
 
-  useEffect(() => () => {
-    endingRef.current = true;
+  useEffect(() => mountConversationLifecycle(endingRef, () => {
     clientRef.current?.close();
     microphoneRef.current?.stop();
     playbackRef.current?.close();
     audioContextRef.current?.close();
-  }, []);
+  }), []);
 
   return {
     sessionState,
