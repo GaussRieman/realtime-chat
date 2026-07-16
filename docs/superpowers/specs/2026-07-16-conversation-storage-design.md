@@ -41,7 +41,7 @@
 
 ### 2.1 SQLite 驱动
 
-服务端使用 Node.js 内置 `node:sqlite`，不增加第三方数据库依赖。项目运行要求从 Node.js 20 提升为 Node.js 22.5 或更高版本。第一版不支持 Node.js 20，也不同时维护第三方 SQLite 驱动。
+服务端使用 Node.js 内置 `node:sqlite`，不增加第三方数据库依赖。项目运行要求从 Node.js 20 提升为 Node.js 22.13 或更高版本，避免 Node.js 22.5 至 22.12 仍需 `--experimental-sqlite` 启动参数的问题。第一版不支持更早版本，也不同时维护第三方 SQLite 驱动。
 
 ### 2.2 数据库文件
 
@@ -84,6 +84,7 @@ CREATE TABLE conversations (
   summary TEXT,
   concerns_json TEXT,
   analysis_generated_at TEXT,
+  analysis_version INTEGER NOT NULL DEFAULT 0 CHECK (analysis_version >= 0),
   summary_edited INTEGER NOT NULL DEFAULT 0 CHECK (summary_edited IN (0, 1)),
   concerns_edited INTEGER NOT NULL DEFAULT 0 CHECK (concerns_edited IN (0, 1)),
   created_at INTEGER NOT NULL,
@@ -104,6 +105,7 @@ CREATE INDEX conversations_ended_at_idx
 - `summary` 和 `concerns_json` 在分析尚未成功时为 `NULL`。
 - `concerns_json` 是 JSON 数组字符串。每项结构与现有分析结果一致：`id`、`text`、`evidenceSequences`。写入前必须完成结构校验，读取后必须安全解析。
 - `analysis_generated_at` 保留模型生成时间；用户编辑不会改变它。
+- `analysis_version` 用于分析结果的乐观并发控制；没有分析时为 `0`，每次成功更新后加 `1`。
 - `summary_edited` 和 `concerns_edited` 表示对应内容是否经过用户保存修改。
 
 关注点不拆成第三张表，因为第一版只整组读取、整组编辑和整组导出，数量最多 5 条。将其作为受校验 JSON 保存能保持两表结构，同时避免无收益的关联写入。
@@ -114,6 +116,7 @@ CREATE INDEX conversations_ended_at_idx
 CREATE TABLE transcript_items (
   conversation_id TEXT NOT NULL,
   sequence INTEGER NOT NULL CHECK (sequence > 0),
+  analysis_sequence INTEGER,
   item_id TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
   text TEXT NOT NULL,
@@ -122,6 +125,7 @@ CREATE TABLE transcript_items (
   started_at INTEGER NOT NULL,
   completed_at INTEGER,
   PRIMARY KEY (conversation_id, sequence),
+  UNIQUE (conversation_id, analysis_sequence),
   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
 
@@ -131,7 +135,9 @@ CREATE UNIQUE INDEX transcript_items_item_id_idx
 
 规则：
 
-- `sequence` 来自冻结快照的显示顺序，从 1 开始连续编号。
+- `sequence` 来自包含系统消息的完整冻结快照显示顺序，从 1 开始连续编号。
+- `analysis_sequence` 只为可参与分析的非空 `user` 和 `assistant` 条目编号，从 1 开始连续递增；系统消息和不可分析状态为 `NULL`。
+- `analysis_sequence` 必须与现有 `createAnalysisPayload()` 和原文报告使用的序号完全一致，`evidenceSequences` 只引用这个命名空间，不能引用完整历史的 `sequence`。
 - 保存所有非空字幕，包括现有界面中的系统连接消息和错误提示；分析仍只消费 `user` 与 `assistant`。
 - 空文本不入库。
 - 结束时仍为 `streaming` 的条目先按现有规则转为 `interrupted`，数据库不接受 `streaming`。
@@ -248,12 +254,13 @@ Express 路由不直接包含 SQL。实时 WebSocket 代理和分析模型调用
   "summary": "本次对话主要讨论了……",
   "concerns": [],
   "generatedAt": "2026-07-16T07:30:00.000Z",
+  "expectedVersion": 0,
   "summaryEdited": false,
   "concernsEdited": false
 }
 ```
 
-用户编辑保存使用同一接口和完整当前值，并将对应的 `Edited` 标志设为 `true`。更新采用整组替换，不提供关注点局部修改接口。
+用户编辑保存使用同一接口和完整当前值，将对应的 `Edited` 标志设为 `true`，并携带最近一次成功响应返回的 `expectedVersion`。更新采用整组替换，不提供关注点局部修改接口。
 
 规则：
 
@@ -262,6 +269,8 @@ Express 路由不直接包含 SQL。实时 WebSocket 代理和分析模型调用
 - 关注点最多 5 条；`id`、文字和证据序号必须满足现有分析契约。
 - 用户编辑关注点时仍不得改变 `id`、顺序或 `evidenceSequences`；服务端将请求与已保存结构比较并拒绝结构变化。
 - 模型生成的首次保存允许建立关注点结构；后续更新只允许修改摘要和关注点文字。
+- 服务端使用 `UPDATE ... WHERE id = ? AND analysis_version = ?` 原子更新并把版本加 `1`。版本不匹配返回 `409 ANALYSIS_VERSION_CONFLICT`，不得覆盖现有内容。
+- 成功响应返回新的 `analysisVersion`。
 - 更新失败不得清空已有分析字段。
 
 ### 5.3 历史列表
@@ -290,7 +299,57 @@ Express 路由不直接包含 SQL。实时 WebSocket 代理和分析模型调用
 
 `GET /api/conversations/:conversationId`
 
-返回会话全部元信息、分析结果、编辑标记和按 `sequence` 排序的完整字幕。不存在时返回 `404 CONVERSATION_NOT_FOUND`。
+返回会话全部元信息、分析结果、`analysisVersion`、编辑标记和按 `sequence` 排序的完整字幕。不存在时返回 `404 CONVERSATION_NOT_FOUND`。
+
+响应示例：
+
+```json
+{
+  "conversationId": "550e8400-e29b-41d4-a716-446655440000",
+  "startedAt": 1784196000000,
+  "endedAt": 1784196120000,
+  "durationSeconds": 95,
+  "voice": "longanqian",
+  "transcriptionStatus": "partial",
+  "transcriptionFailureCount": 1,
+  "analysisVersion": 2,
+  "analysis": {
+    "summary": "本次对话主要讨论了……",
+    "concerns": [
+      {
+        "id": "concern-1",
+        "text": "仍需确认具体时间。",
+        "evidenceSequences": [1]
+      }
+    ],
+    "generatedAt": "2026-07-16T07:30:00.000Z",
+    "summaryEdited": true,
+    "concernsEdited": false
+  },
+  "transcript": [
+    {
+      "id": "system-1",
+      "sequence": 1,
+      "analysisSequence": null,
+      "role": "system",
+      "text": "声音链路已建立，可以直接开始说话",
+      "status": "completed",
+      "startedAt": 1784196001000,
+      "completedAt": 1784196001000
+    },
+    {
+      "id": "user-1",
+      "sequence": 2,
+      "analysisSequence": 1,
+      "role": "user",
+      "text": "下周开始可以吗？",
+      "status": "completed",
+      "startedAt": 1784196003000,
+      "completedAt": 1784196004000
+    }
+  ]
+}
+```
 
 历史详情是只读接口。第一版不提供删除或覆盖字幕的 API。
 
@@ -314,6 +373,7 @@ Express 路由不直接包含 SQL。实时 WebSocket 代理和分析模型调用
 - `CONVERSATION_INVALID`：请求无效，`400`，不可重试。
 - `CONVERSATION_TOO_LARGE`：请求体或字幕数量超限，`413`，不可重试。
 - `CONVERSATION_NOT_FOUND`：目标会话不存在，`404`，不可重试。
+- `ANALYSIS_VERSION_CONFLICT`：分析版本已变化，`409`，需要重新读取详情后再保存。
 - `CONVERSATION_SAVE_FAILED`：事务或磁盘写入失败，`500`，可重试。
 - `CONVERSATION_READ_FAILED`：查询失败，`500`，可重试。
 
@@ -329,16 +389,19 @@ Express 路由不直接包含 SQL。实时 WebSocket 代理和分析模型调用
 2. 前端立即调用 `POST /api/conversations` 保存基础信息和字幕。
 3. 保存与分析互不阻塞：两项都以同一不可变快照为输入，可以并行开始。
 4. 基础保存成功后记录本会话已经持久化；失败时保留快照和错误，显示“本次记录未保存 · 重试”。
-5. 分析成功后调用分析更新接口；若基础保存仍在进行，先等待其完成，确保不会出现分析先于会话记录。
+5. 分析成功后把模型结果加入该 `conversationId` 的持久化写入队列；若基础保存仍在进行，先等待其完成，再以 `expectedVersion: 0` 保存模型结果。
 6. 分析失败不删除基础记录；当前页面继续提供现有分析重试。
 
 ### 6.2 用户编辑分析
 
 现有分析弹窗中的“保存”先更新本地 reducer，再调用分析更新接口：
 
+- 每个 `conversationId` 只有一个串行持久化写入队列。模型结果保存必须排在用户编辑保存之前，不能并行发送。
+- 只有模型结果首次持久化成功并获得 `analysisVersion` 后，后续用户编辑才可写入 SQLite。此前用户仍可本地编辑，但历史保存状态显示等待或失败，不能伪装成已经持久化。
 - SQLite 更新成功后显示已保存状态。
 - SQLite 更新失败时保留本地编辑内容，并提示“编辑尚未写入历史 · 重试”。
 - 失败不能自动恢复成模型原文，也不能关闭弹窗。
+- 如果收到 `409 ANALYSIS_VERSION_CONFLICT`，停止自动重试并重新读取历史详情；不得用旧页面状态覆盖数据库中的较新分析。
 
 ### 6.3 保存状态隔离
 
@@ -392,7 +455,7 @@ Express 路由不直接包含 SQL。实时 WebSocket 代理和分析模型调用
 - 单次会话最多保存 2,000 条字幕。
 - 单条字幕文本最多 16,000 个 Unicode 字符。
 - 摘要最多 20,000 个 Unicode 字符；单条关注点最多 4,000 个 Unicode 字符。
-- 关注点最多 5 条，证据序号必须是正整数且指向存在的用户或千问字幕。
+- 关注点最多 5 条，证据序号必须是正整数且指向存在的 `analysis_sequence`。
 - 不接受未知角色、未知状态、非法 UUID、非有限时间戳或负时长。
 - SQL 只使用预编译语句，禁止字符串拼接用户输入。
 - API 返回数据库数据前再次规范化 JSON 字段，损坏的 `concerns_json` 不得导致整个服务崩溃。
@@ -413,6 +476,8 @@ Express 路由不直接包含 SQL。实时 WebSocket 代理和分析模型调用
 - 重试保存基础快照时保留已经存在的分析字段。
 - `complete`、`partial`、`unavailable` 状态计算。
 - 分析首次保存和用户编辑更新。
+- 分析版本冲突不会覆盖较新内容。
+- 模型结果与用户编辑的持久化写入严格串行。
 - 用户编辑不能改变关注点结构或证据序号。
 - 最近 50 条按结束时间倒序返回。
 - 详情按 `sequence` 返回字幕。
@@ -444,7 +509,7 @@ Express 路由不直接包含 SQL。实时 WebSocket 代理和分析模型调用
 
 - 现有实时语音、暂停/继续、主动结束和分析测试全部通过。
 - `npm test` 和 `npm run build` 通过。
-- 使用 Node.js 22.5 或更高版本执行一次真实 SQLite 建库、保存、重启和读取验证。
+- 使用 Node.js 22.13 或更高版本执行一次真实 SQLite 建库、保存、重启和读取验证。
 
 ## 10. 验收场景
 
