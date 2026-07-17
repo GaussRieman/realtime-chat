@@ -34,7 +34,7 @@ export class MicrophoneCapture {
     });
 
     await this.context.resume();
-    await this.context.audioWorklet.addModule("/audio-capture-worklet.js");
+    await this.context.audioWorklet.addModule(`${import.meta.env.BASE_URL}audio-capture-worklet.js`);
 
     this.source = this.context.createMediaStreamSource(this.stream);
     this.worklet = new AudioWorkletNode(this.context, "audio-capture-processor");
